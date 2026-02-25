@@ -38,6 +38,27 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level info
 - `get_data_agent_connected_data_summary(...)`
 - `start_data_agent_conversation(...)`
 - `message_data_agent(...)`
-- `inconvo_data_agent_server(...)`
+- `inconvo_data_agent(...)`
 
-`InconvoToolsOptions.inconvo` is optional. If omitted, tools create `Inconvo` from `INCONVO_API_KEY`.
+`inconvo_data_agent(...)` auto-creates `Inconvo` from `INCONVO_API_KEY` unless you pass a client explicitly.
+
+```python
+from inconvo_claude_sdk import inconvo_data_agent
+
+data_agent = inconvo_data_agent(
+    agent_id=os.environ["INCONVO_AGENT_ID"],
+    user_identifier="user-123",
+    user_context={"organisationId": 1},
+)
+
+agent_options = ClaudeAgentOptions(
+    tools=[],
+    model="claude-sonnet-4-6",
+    mcp_servers={"data-analyst": data_agent},
+    allowed_tools=[
+        "mcp__data-analyst__get_data_agent_connected_data_summary",
+        "mcp__data-analyst__start_data_agent_conversation",
+        "mcp__data-analyst__message_data_agent",
+    ],
+)
+```
