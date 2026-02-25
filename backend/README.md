@@ -38,5 +38,6 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000 --log-level info
 - `get_data_agent_connected_data_summary(...)`
 - `start_data_agent_conversation(...)`
 - `message_data_agent(...)`
-- `create_inconvo_data_agent_server(...)`
-- `allowed_tool_names(...)`
+- `inconvo_data_agent_server(...)`
+
+`InconvoToolsOptions.inconvo` is optional. If omitted, tools create `Inconvo` from `INCONVO_API_KEY`.

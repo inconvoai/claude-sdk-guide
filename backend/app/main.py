@@ -9,18 +9,14 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from inconvo import Inconvo
 from pydantic import BaseModel, Field
 
 from inconvo_claude_sdk import (
     InconvoToolsOptions,
-    allowed_tool_names,
-    create_inconvo_data_agent_server,
+    InconvoToolsState,
+    inconvo_data_agent_server,
 )
 
-SERVER_NAME = "data-analyst-tools"
-DEFAULT_USER_IDENTIFIER = "user-123"
-DEFAULT_USER_CONTEXT: dict[str, str | int | float | bool] = {"organisationId": 1}
 CLAUDE_MODEL = "claude-sonnet-4-6"
 CHAT_TIMEOUT_SECONDS = float(os.getenv("CHAT_TIMEOUT_SECONDS", "120"))
 SYSTEM_PROMPT = "\n".join(
@@ -38,7 +34,7 @@ SYSTEM_PROMPT = "\n".join(
 @dataclass
 class ClaudeChatSession:
     client: Any
-    tools_options: InconvoToolsOptions
+    tools_state: InconvoToolsState
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -90,22 +86,6 @@ def _ensure_claude_home() -> str:
     return str(home_dir)
 
 
-def _build_agent_options(custom_server: Any, anthropic_api_key: str) -> Any:
-    from claude_agent_sdk import ClaudeAgentOptions
-
-    return ClaudeAgentOptions(
-        tools=[],
-        mcp_servers={SERVER_NAME: custom_server},
-        allowed_tools=allowed_tool_names(SERVER_NAME),
-        model=CLAUDE_MODEL,
-        system_prompt=SYSTEM_PROMPT,
-        env={
-            "ANTHROPIC_API_KEY": anthropic_api_key,
-            "HOME": _ensure_claude_home(),
-        },
-    )
-
-
 async def _run_claude_turn(session: ClaudeChatSession, prompt: str) -> str:
     from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
 
@@ -131,30 +111,42 @@ async def _run_claude_turn(session: ClaudeChatSession, prompt: str) -> str:
 
 async def _create_session(
     anthropic_api_key: str,
-    inconvo_api_key: str,
     inconvo_agent_id: str,
 ) -> ClaudeChatSession:
-    from claude_agent_sdk import ClaudeSDKClient
+    from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
-    inconvo = Inconvo(api_key=inconvo_api_key)
-    tools_options = InconvoToolsOptions(
-        agent_id=inconvo_agent_id,
-        user_identifier=DEFAULT_USER_IDENTIFIER,
-        user_context=DEFAULT_USER_CONTEXT,
-        inconvo=inconvo,
+    _require_env("INCONVO_API_KEY")
+    tools_state = InconvoToolsState()
+
+    client = ClaudeSDKClient(
+        ClaudeAgentOptions(
+            tools=[],
+            mcp_servers={
+                "data-analyst": inconvo_data_agent_server(
+                    InconvoToolsOptions(
+                        agent_id=inconvo_agent_id,
+                        user_identifier="user-123",
+                        user_context={"organisationId": 1},
+                    ),
+                    state=tools_state,
+                )
+            },
+            model=CLAUDE_MODEL,
+            system_prompt=SYSTEM_PROMPT,
+            env={
+                "ANTHROPIC_API_KEY": anthropic_api_key,
+                "HOME": _ensure_claude_home(),
+            },
+        )
     )
-
-    custom_server = create_inconvo_data_agent_server(tools_options, server_name=SERVER_NAME)
-    client = ClaudeSDKClient(_build_agent_options(custom_server, anthropic_api_key))
     await client.connect()
 
-    return ClaudeChatSession(client=client, tools_options=tools_options)
+    return ClaudeChatSession(client=client, tools_state=tools_state)
 
 
 async def _get_or_create_session(
     session_id: str,
     anthropic_api_key: str,
-    inconvo_api_key: str,
     inconvo_agent_id: str,
 ) -> ClaudeChatSession:
     existing = _SESSIONS.get(session_id)
@@ -168,7 +160,6 @@ async def _get_or_create_session(
 
         created = await _create_session(
             anthropic_api_key=anthropic_api_key,
-            inconvo_api_key=inconvo_api_key,
             inconvo_agent_id=inconvo_agent_id,
         )
         _SESSIONS[session_id] = created
@@ -197,7 +188,6 @@ async def chat(request: ChatRequest) -> ChatResponse:
         session = await _get_or_create_session(
             session_id=session_id,
             anthropic_api_key=_require_env("ANTHROPIC_API_KEY"),
-            inconvo_api_key=_require_env("INCONVO_API_KEY"),
             inconvo_agent_id=_require_env("INCONVO_AGENT_ID"),
         )
 
@@ -207,20 +197,20 @@ async def chat(request: ChatRequest) -> ChatResponse:
             tool_calls.append(ToolCall(**record))
 
         async with session.lock:
-            session.tools_options.on_tool_call = on_tool_call
+            session.tools_state.on_tool_call = on_tool_call
             try:
                 assistant_text = await asyncio.wait_for(
                     _run_claude_turn(session, text),
                     timeout=CHAT_TIMEOUT_SECONDS,
                 )
             finally:
-                session.tools_options.on_tool_call = None
+                session.tools_state.on_tool_call = None
 
         return ChatResponse(
             assistant_text=assistant_text,
             tool_calls=tool_calls,
             session_id=session_id,
-            conversation_id=session.tools_options.conversation_id,
+            conversation_id=session.tools_state.conversation_id,
         )
     except asyncio.TimeoutError as exc:
         raise HTTPException(

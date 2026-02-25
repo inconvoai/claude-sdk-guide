@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Callable
 
 from inconvo import Inconvo
 
-from .types import InconvoToolsOptions, ToolCallRecord
+from .types import InconvoToolsOptions, InconvoToolsState, ToolCallRecord
 
 DEFAULT_MESSAGE_DATA_AGENT_DESCRIPTION = "\n".join(
     [
@@ -38,9 +39,9 @@ def _validate_options(options: InconvoToolsOptions) -> None:
         raise ValueError("agent_id is required.")
 
 
-def _emit(options: InconvoToolsOptions, record: ToolCallRecord) -> None:
-    if options.on_tool_call:
-        options.on_tool_call(record)
+def _emit(state: InconvoToolsState, record: ToolCallRecord) -> None:
+    if state.on_tool_call:
+        state.on_tool_call(record)
 
 
 def _serialize_response(value: Any) -> Any:
@@ -72,7 +73,21 @@ def _as_bool(value: Any, *, default: bool = False) -> bool:
     return default
 
 
-def _create_conversation(inconvo: Inconvo, options: InconvoToolsOptions) -> str:
+def _resolve_inconvo(options: InconvoToolsOptions) -> Inconvo:
+    if options.inconvo:
+        return options.inconvo
+
+    api_key = os.getenv("INCONVO_API_KEY")
+    if not api_key:
+        raise RuntimeError("Missing INCONVO_API_KEY for default Inconvo client.")
+    return Inconvo(api_key=api_key)
+
+
+def _create_conversation(
+    inconvo: Inconvo,
+    options: InconvoToolsOptions,
+    state: InconvoToolsState,
+) -> str:
     if not options.user_identifier:
         raise ValueError("user_identifier is required.")
     if not options.user_context:
@@ -86,13 +101,17 @@ def _create_conversation(inconvo: Inconvo, options: InconvoToolsOptions) -> str:
     if not conversation or not conversation.id:
         raise RuntimeError("Failed to start conversation with data analyst.")
 
-    options.conversation_id = conversation.id
+    state.conversation_id = conversation.id
     return conversation.id
 
 
-def get_data_agent_connected_data_summary(options: InconvoToolsOptions):
+def get_data_agent_connected_data_summary(
+    options: InconvoToolsOptions,
+    state: InconvoToolsState | None = None,
+):
     _validate_options(options)
-    inconvo = options.inconvo or Inconvo()
+    resolved_state = state or InconvoToolsState()
+    inconvo = _resolve_inconvo(options)
     tool_decorator = _get_tool_decorator()
 
     @tool_decorator(
@@ -108,7 +127,7 @@ def get_data_agent_connected_data_summary(options: InconvoToolsOptions):
             summary = inconvo.agents.data_summary.retrieve(options.agent_id)
             result = summary.data_summary
             _emit(
-                options,
+                resolved_state,
                 {
                     "name": tool_name,
                     "input": tool_input,
@@ -119,7 +138,7 @@ def get_data_agent_connected_data_summary(options: InconvoToolsOptions):
             return {"content": [{"type": "text", "text": _as_tool_text(result)}]}
         except Exception as exc:  # pragma: no cover - defensive path
             _emit(
-                options,
+                resolved_state,
                 {
                     "name": tool_name,
                     "input": tool_input,
@@ -132,14 +151,18 @@ def get_data_agent_connected_data_summary(options: InconvoToolsOptions):
     return _tool
 
 
-def start_data_agent_conversation(options: InconvoToolsOptions):
+def start_data_agent_conversation(
+    options: InconvoToolsOptions,
+    state: InconvoToolsState | None = None,
+):
     _validate_options(options)
+    resolved_state = state or InconvoToolsState()
     if not options.user_identifier:
         raise ValueError("user_identifier is required.")
     if not options.user_context:
         raise ValueError("user_context is required.")
 
-    inconvo = options.inconvo or Inconvo()
+    inconvo = _resolve_inconvo(options)
     tool_decorator = _get_tool_decorator()
 
     @tool_decorator(
@@ -162,14 +185,14 @@ def start_data_agent_conversation(options: InconvoToolsOptions):
         force_new = _as_bool(tool_input.get("force_new"), default=False)
 
         try:
-            if options.conversation_id and not force_new:
-                result: dict[str, Any] | str = {"conversationId": options.conversation_id}
+            if resolved_state.conversation_id and not force_new:
+                result: dict[str, Any] | str = {"conversationId": resolved_state.conversation_id}
             else:
-                conversation_id = _create_conversation(inconvo, options)
+                conversation_id = _create_conversation(inconvo, options, resolved_state)
                 result = {"conversationId": conversation_id}
 
             _emit(
-                options,
+                resolved_state,
                 {
                     "name": tool_name,
                     "input": tool_input,
@@ -180,7 +203,7 @@ def start_data_agent_conversation(options: InconvoToolsOptions):
             return {"content": [{"type": "text", "text": _as_tool_text(result)}]}
         except Exception as exc:  # pragma: no cover - defensive path
             _emit(
-                options,
+                resolved_state,
                 {
                     "name": tool_name,
                     "input": tool_input,
@@ -193,10 +216,14 @@ def start_data_agent_conversation(options: InconvoToolsOptions):
     return _tool
 
 
-def message_data_agent(options: InconvoToolsOptions):
+def message_data_agent(
+    options: InconvoToolsOptions,
+    state: InconvoToolsState | None = None,
+):
     _validate_options(options)
+    resolved_state = state or InconvoToolsState()
 
-    inconvo = options.inconvo or Inconvo()
+    inconvo = _resolve_inconvo(options)
     tool_decorator = _get_tool_decorator()
     analyst_description = options.message_description or DEFAULT_MESSAGE_DATA_AGENT_DESCRIPTION
 
@@ -224,10 +251,10 @@ def message_data_agent(options: InconvoToolsOptions):
         if not message:
             raise ValueError("message is required.")
 
-        resolved_conversation_id = options.conversation_id or conversation_id
+        resolved_conversation_id = resolved_state.conversation_id or conversation_id
         if not resolved_conversation_id:
-            resolved_conversation_id = _create_conversation(inconvo, options)
-        options.conversation_id = resolved_conversation_id
+            resolved_conversation_id = _create_conversation(inconvo, options, resolved_state)
+        resolved_state.conversation_id = resolved_conversation_id
 
         tool_name = "message_data_agent"
         tool_input: dict[str, Any] = {
@@ -243,7 +270,7 @@ def message_data_agent(options: InconvoToolsOptions):
             )
             result = _serialize_response(response)
             _emit(
-                options,
+                resolved_state,
                 {
                     "name": tool_name,
                     "input": tool_input,
@@ -254,7 +281,7 @@ def message_data_agent(options: InconvoToolsOptions):
             return {"content": [{"type": "text", "text": _as_tool_text(result)}]}
         except Exception as exc:  # pragma: no cover - defensive path
             _emit(
-                options,
+                resolved_state,
                 {
                     "name": tool_name,
                     "input": tool_input,
