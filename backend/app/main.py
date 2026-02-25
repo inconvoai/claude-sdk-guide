@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,10 +33,6 @@ SYSTEM_PROMPT = "\n".join(
     ]
 )
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
-logger = logging.getLogger("inconvo_claude_backend")
-logger.setLevel(logging.INFO)
-
 
 @dataclass
 class ClaudeChatSession:
@@ -51,8 +46,7 @@ _SESSIONS_LOCK = asyncio.Lock()
 
 
 class ChatRequest(BaseModel):
-    text: str | None = None
-    messages: list[dict[str, Any]] = Field(default_factory=list)
+    text: str
     session_id: str | None = None
 
 
@@ -88,27 +82,9 @@ def _require_env(name: str) -> str:
     return value
 
 
-def _resolve_request_text(request: ChatRequest) -> str:
-    if isinstance(request.text, str) and request.text.strip():
-        return request.text.strip()
-
-    for item in reversed(request.messages):
-        if not isinstance(item, dict):
-            continue
-        text = item.get("text")
-        if isinstance(text, str) and text.strip():
-            return text.strip()
-
-    return ""
-
-
 def _ensure_claude_home() -> str:
     configured = os.getenv("CLAUDE_HOME_DIR")
-    if configured:
-        home_dir = Path(configured)
-    else:
-        home_dir = Path(__file__).resolve().parent.parent / ".claude-home"
-
+    home_dir = Path(configured) if configured else Path(__file__).resolve().parent.parent / ".claude-home"
     home_dir.mkdir(parents=True, exist_ok=True)
     return str(home_dir)
 
@@ -116,21 +92,14 @@ def _ensure_claude_home() -> str:
 def _build_agent_options(custom_server: Any, anthropic_api_key: str) -> Any:
     from claude_agent_sdk import ClaudeAgentOptions
 
-    def _stderr_logger(line: str) -> None:
-        logger.info("claude-cli: %s", line)
-
-    claude_env = {
-        "ANTHROPIC_API_KEY": anthropic_api_key,
-        "HOME": _ensure_claude_home(),
-    }
-
     return ClaudeAgentOptions(
         mcp_servers={SERVER_NAME: custom_server},
         allowed_tools=allowed_tool_names(SERVER_NAME),
         system_prompt=SYSTEM_PROMPT,
-        env=claude_env,
-        stderr=_stderr_logger,
-        extra_args={"debug-to-stderr": None},
+        env={
+            "ANTHROPIC_API_KEY": anthropic_api_key,
+            "HOME": _ensure_claude_home(),
+        },
     )
 
 
@@ -158,7 +127,6 @@ async def _run_claude_turn(session: ClaudeChatSession, prompt: str) -> str:
 
 
 async def _create_session(
-    session_id: str,
     anthropic_api_key: str,
     inconvo_api_key: str,
     inconvo_agent_id: str,
@@ -174,12 +142,9 @@ async def _create_session(
     )
 
     custom_server = create_inconvo_data_agent_server(tools_options, server_name=SERVER_NAME)
-    agent_options = _build_agent_options(custom_server, anthropic_api_key)
-
-    client = ClaudeSDKClient(agent_options)
+    client = ClaudeSDKClient(_build_agent_options(custom_server, anthropic_api_key))
     await client.connect()
 
-    logger.info("created new Claude SDK session: %s", session_id)
     return ClaudeChatSession(client=client, tools_options=tools_options)
 
 
@@ -199,7 +164,6 @@ async def _get_or_create_session(
             return existing
 
         created = await _create_session(
-            session_id=session_id,
             anthropic_api_key=anthropic_api_key,
             inconvo_api_key=inconvo_api_key,
             inconvo_agent_id=inconvo_agent_id,
@@ -214,70 +178,40 @@ async def health() -> dict[str, str | int]:
 
 
 @app.get("/")
-async def root() -> dict[str, str | int]:
-    return {
-        "status": "ok",
-        "active_sessions": len(_SESSIONS),
-        "message": "Backend is running. Use /health or POST /chat.",
-    }
+async def root() -> dict[str, str]:
+    return {"status": "ok", "message": "Use POST /chat"}
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
-    text = _resolve_request_text(request)
+    text = request.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="text cannot be empty")
 
-    request_id = uuid4().hex[:8]
     session_id = request.session_id or uuid4().hex
 
-    logger.info("[%s] /chat received session=%s", request_id, session_id)
-
     try:
-        anthropic_api_key = _require_env("ANTHROPIC_API_KEY")
-        inconvo_api_key = _require_env("INCONVO_API_KEY")
-        inconvo_agent_id = _require_env("INCONVO_AGENT_ID")
-
         session = await _get_or_create_session(
             session_id=session_id,
-            anthropic_api_key=anthropic_api_key,
-            inconvo_api_key=inconvo_api_key,
-            inconvo_agent_id=inconvo_agent_id,
+            anthropic_api_key=_require_env("ANTHROPIC_API_KEY"),
+            inconvo_api_key=_require_env("INCONVO_API_KEY"),
+            inconvo_agent_id=_require_env("INCONVO_AGENT_ID"),
         )
 
         tool_calls: list[ToolCall] = []
 
-        def _logger(record: dict[str, Any]) -> None:
+        def on_tool_call(record: dict[str, Any]) -> None:
             tool_calls.append(ToolCall(**record))
-            logger.info(
-                "[%s] tool call: %s input=%s",
-                request_id,
-                record.get("name"),
-                record.get("input"),
-            )
 
         async with session.lock:
-            session.tools_options.on_tool_call = _logger
+            session.tools_options.on_tool_call = on_tool_call
             try:
-                logger.info(
-                    "[%s] running turn session=%s data_conversation=%s",
-                    request_id,
-                    session_id,
-                    session.tools_options.conversation_id or "<none>",
-                )
                 assistant_text = await asyncio.wait_for(
                     _run_claude_turn(session, text),
                     timeout=CHAT_TIMEOUT_SECONDS,
                 )
             finally:
                 session.tools_options.on_tool_call = None
-
-        logger.info(
-            "[%s] turn complete session=%s data_conversation=%s",
-            request_id,
-            session_id,
-            session.tools_options.conversation_id or "<none>",
-        )
 
         return ChatResponse(
             assistant_text=assistant_text,
@@ -286,24 +220,21 @@ async def chat(request: ChatRequest) -> ChatResponse:
             conversation_id=session.tools_options.conversation_id,
         )
     except asyncio.TimeoutError as exc:
-        logger.exception("[%s] timed out after %.0f seconds", request_id, CHAT_TIMEOUT_SECONDS)
         raise HTTPException(
             status_code=504,
             detail=f"Chat timed out after {int(CHAT_TIMEOUT_SECONDS)} seconds.",
         ) from exc
     except RuntimeError as exc:
-        logger.exception("[%s] runtime error", request_id)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-    except Exception as exc:  # pragma: no cover - network/sdk error path
-        logger.exception("[%s] chat processing failed", request_id)
+    except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=500, detail=f"Chat processing failed: {exc}") from exc
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    for session_id, session in list(_SESSIONS.items()):
+    for session in list(_SESSIONS.values()):
         try:
             await session.client.disconnect()
         except Exception:
-            logger.exception("failed to close session %s", session_id)
+            pass
     _SESSIONS.clear()

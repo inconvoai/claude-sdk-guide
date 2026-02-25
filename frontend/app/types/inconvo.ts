@@ -26,11 +26,6 @@ export type ToolCall = {
   is_error: boolean;
 };
 
-export type ChatRequestMessage = {
-  role: "user" | "assistant";
-  text: string;
-};
-
 export type ChatRequest = {
   text: string;
   session_id?: string;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { InconvoToolResult } from "./components/inconvo";
 import type { ChatRequest, ChatResponse, ToolCall } from "./types/inconvo";
 
@@ -10,7 +10,6 @@ type ChatMessage = {
   text: string;
   toolResults?: unknown[];
 };
-const SESSION_STORAGE_KEY = "inconvo_chat_session_id";
 
 const shouldRenderToolCall = (call: ToolCall): boolean => {
   if (call.name === "start_data_agent_conversation") {
@@ -38,21 +37,6 @@ export default function Chat() {
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
 
-  useEffect(() => {
-    try {
-      const storedSession = window.localStorage.getItem(SESSION_STORAGE_KEY);
-      if (storedSession) {
-        setSessionId(storedSession);
-      } else {
-        const generated = crypto.randomUUID();
-        window.localStorage.setItem(SESSION_STORAGE_KEY, generated);
-        setSessionId(generated);
-      }
-    } catch {
-      // Ignore storage access issues in restricted browser modes.
-    }
-  }, []);
-
   const sendMessage = async () => {
     const trimmed = input.trim();
     if (!trimmed || isLoading) return;
@@ -70,14 +54,10 @@ export default function Chat() {
     setIsLoading(true);
 
     try {
-      const nextSessionId = sessionId ?? crypto.randomUUID();
-      if (!sessionId) {
+      const nextSessionId =
+        messages.length === 0 || !sessionId ? crypto.randomUUID() : sessionId;
+      if (nextSessionId !== sessionId) {
         setSessionId(nextSessionId);
-        try {
-          window.localStorage.setItem(SESSION_STORAGE_KEY, nextSessionId);
-        } catch {
-          // Ignore storage access issues.
-        }
       }
 
       const payload: ChatRequest = {
@@ -108,11 +88,6 @@ export default function Chat() {
       const success = data as ChatResponse;
       if (success.session_id && success.session_id !== sessionId) {
         setSessionId(success.session_id);
-        try {
-          window.localStorage.setItem(SESSION_STORAGE_KEY, success.session_id);
-        } catch {
-          // Ignore storage access issues.
-        }
       }
 
       const assistantMessage: ChatMessage = {
