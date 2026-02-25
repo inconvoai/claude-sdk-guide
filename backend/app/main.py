@@ -3,10 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import AsyncIterator, Iterable
-from typing import Any, Literal
-from uuid import uuid4
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,20 +23,37 @@ SERVER_NAME = "my-custom-tools"
 DEFAULT_USER_IDENTIFIER = "user-123"
 DEFAULT_USER_CONTEXT: dict[str, str | int | float | bool] = {"organisationId": 1}
 CHAT_TIMEOUT_SECONDS = float(os.getenv("CHAT_TIMEOUT_SECONDS", "120"))
+SYSTEM_PROMPT = "\n".join(
+    [
+        "When you receive structured data (tables, charts) from tools, do NOT recreate or reformat them as markdown tables in your response.",
+        "The tool output is rendered directly as UI.",
+        "You may provide brief context and insights, but never duplicate data from tool output.",
+        "Conversation policy: reuse the same data-analyst conversation for follow-up requests.",
+        "Only replace the conversation when there is a clear topic reset.",
+        "When replacing, call start_data_agent_conversation with force_new=true.",
+    ]
+)
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("inconvo_claude_backend")
 logger.setLevel(logging.INFO)
 
 
-class ChatMessage(BaseModel):
-    role: Literal["user", "assistant"]
-    text: str
-    tool_results: list[dict[str, Any]] | None = None
+@dataclass
+class ClaudeChatSession:
+    client: Any
+    tools_options: InconvoToolsOptions
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+_SESSIONS: dict[str, ClaudeChatSession] = {}
+_SESSIONS_LOCK = asyncio.Lock()
 
 
 class ChatRequest(BaseModel):
-    messages: list[ChatMessage] = Field(default_factory=list)
+    text: str | None = None
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    session_id: str | None = None
 
 
 class ToolCall(BaseModel):
@@ -49,6 +66,8 @@ class ToolCall(BaseModel):
 class ChatResponse(BaseModel):
     assistant_text: str
     tool_calls: list[ToolCall] = Field(default_factory=list)
+    session_id: str
+    conversation_id: str | None = None
 
 
 app = FastAPI(title="Inconvo + Claude SDK Backend", version="0.1.0")
@@ -69,71 +88,18 @@ def _require_env(name: str) -> str:
     return value
 
 
-def _build_prompt(messages: Iterable[ChatMessage]) -> str:
-    lines = [
-        "When you receive structured data (tables, charts) from tools, do NOT recreate or reformat them as markdown tables in your response.",
-        "The tool output is rendered directly as UI.",
-        "You may provide brief context and insights, but never duplicate data from tool output.",
-        "",
-        "Conversation:",
-    ]
+def _resolve_request_text(request: ChatRequest) -> str:
+    if isinstance(request.text, str) and request.text.strip():
+        return request.text.strip()
 
-    for msg in messages:
-        speaker = "User" if msg.role == "user" else "Assistant"
-        lines.append(f"{speaker}: {msg.text}")
+    for item in reversed(request.messages):
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
 
-    lines.append("Assistant:")
-    return "\n".join(lines)
-
-
-def _is_transport_close_error(exc: BaseException) -> bool:
-    return "ProcessTransport is not ready for writing" in str(exc)
-
-
-async def _run_claude_query(prompt: str, agent_options: Any) -> str:
-    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, query
-
-    async def _prompt_stream() -> AsyncIterator[dict[str, Any]]:
-        # Use AsyncIterable input so SDK MCP control protocol can keep stdin open
-        # until the first result (avoids premature stream-close with SDK MCP tools).
-        yield {
-            "type": "user",
-            "session_id": "",
-            "message": {"role": "user", "content": prompt},
-            "parent_tool_use_id": None,
-        }
-
-    chunks: list[str] = []
-    final_result: ResultMessage | None = None
-    saw_transport_close_error = False
-
-    try:
-        async for message in query(prompt=_prompt_stream(), options=agent_options):
-            if isinstance(message, AssistantMessage):
-                for block in message.content:
-                    if isinstance(block, TextBlock):
-                        chunks.append(block.text)
-            elif isinstance(message, ResultMessage):
-                final_result = message
-    except ExceptionGroup as exc:
-        if _is_transport_close_error(exc):
-            saw_transport_close_error = True
-            logger.warning(
-                "Claude SDK transport closed while handling control message; continuing with collected output."
-            )
-        else:
-            raise
-
-    if final_result and final_result.is_error:
-        detail = final_result.result or f"Claude returned error subtype: {final_result.subtype}"
-        raise RuntimeError(detail)
-
-    if not final_result and saw_transport_close_error:
-        raise RuntimeError(
-            "Claude CLI transport closed before returning a final result."
-        )
-
-    return "\n".join(chunk for chunk in chunks if chunk).strip()
+    return ""
 
 
 def _ensure_claude_home() -> str:
@@ -161,67 +127,163 @@ def _build_agent_options(custom_server: Any, anthropic_api_key: str) -> Any:
     return ClaudeAgentOptions(
         mcp_servers={SERVER_NAME: custom_server},
         allowed_tools=allowed_tool_names(SERVER_NAME),
+        system_prompt=SYSTEM_PROMPT,
         env=claude_env,
         stderr=_stderr_logger,
         extra_args={"debug-to-stderr": None},
     )
 
 
+async def _run_claude_turn(session: ClaudeChatSession, prompt: str) -> str:
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+    await session.client.query(prompt)
+
+    chunks: list[str] = []
+    final_result: ResultMessage | None = None
+
+    async for message in session.client.receive_response():
+        if isinstance(message, AssistantMessage):
+            for block in message.content:
+                if isinstance(block, TextBlock):
+                    chunks.append(block.text)
+        elif isinstance(message, ResultMessage):
+            final_result = message
+
+    if final_result and final_result.is_error:
+        detail = final_result.result or f"Claude returned error subtype: {final_result.subtype}"
+        raise RuntimeError(detail)
+
+    return "\n".join(chunk for chunk in chunks if chunk).strip()
+
+
+async def _create_session(
+    session_id: str,
+    anthropic_api_key: str,
+    inconvo_api_key: str,
+    inconvo_agent_id: str,
+) -> ClaudeChatSession:
+    from claude_agent_sdk import ClaudeSDKClient
+
+    inconvo = Inconvo(api_key=inconvo_api_key)
+    tools_options = InconvoToolsOptions(
+        agent_id=inconvo_agent_id,
+        user_identifier=DEFAULT_USER_IDENTIFIER,
+        user_context=DEFAULT_USER_CONTEXT,
+        inconvo=inconvo,
+    )
+
+    custom_server = create_inconvo_data_agent_server(tools_options, server_name=SERVER_NAME)
+    agent_options = _build_agent_options(custom_server, anthropic_api_key)
+
+    client = ClaudeSDKClient(agent_options)
+    await client.connect()
+
+    logger.info("created new Claude SDK session: %s", session_id)
+    return ClaudeChatSession(client=client, tools_options=tools_options)
+
+
+async def _get_or_create_session(
+    session_id: str,
+    anthropic_api_key: str,
+    inconvo_api_key: str,
+    inconvo_agent_id: str,
+) -> ClaudeChatSession:
+    existing = _SESSIONS.get(session_id)
+    if existing:
+        return existing
+
+    async with _SESSIONS_LOCK:
+        existing = _SESSIONS.get(session_id)
+        if existing:
+            return existing
+
+        created = await _create_session(
+            session_id=session_id,
+            anthropic_api_key=anthropic_api_key,
+            inconvo_api_key=inconvo_api_key,
+            inconvo_agent_id=inconvo_agent_id,
+        )
+        _SESSIONS[session_id] = created
+        return created
+
+
 @app.get("/health")
-async def health() -> dict[str, str]:
-    logger.info("health check")
-    return {"status": "ok"}
+async def health() -> dict[str, str | int]:
+    return {"status": "ok", "active_sessions": len(_SESSIONS)}
 
 
 @app.get("/")
-async def root() -> dict[str, str]:
-    return {"status": "ok", "message": "Backend is running. Use /health or POST /chat."}
+async def root() -> dict[str, str | int]:
+    return {
+        "status": "ok",
+        "active_sessions": len(_SESSIONS),
+        "message": "Backend is running. Use /health or POST /chat.",
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
-    if not request.messages:
-        raise HTTPException(status_code=400, detail="messages cannot be empty")
+    text = _resolve_request_text(request)
+    if not text:
+        raise HTTPException(status_code=400, detail="text cannot be empty")
 
     request_id = uuid4().hex[:8]
-    logger.info(
-        "[%s] /chat received with %d message(s)",
-        request_id,
-        len(request.messages),
-    )
+    session_id = request.session_id or uuid4().hex
+
+    logger.info("[%s] /chat received session=%s", request_id, session_id)
 
     try:
         anthropic_api_key = _require_env("ANTHROPIC_API_KEY")
-        inconvo = Inconvo(api_key=_require_env("INCONVO_API_KEY"))
-        options = InconvoToolsOptions(
-            agent_id=_require_env("INCONVO_AGENT_ID"),
-            user_identifier=DEFAULT_USER_IDENTIFIER,
-            user_context=DEFAULT_USER_CONTEXT,
-            inconvo=inconvo,
+        inconvo_api_key = _require_env("INCONVO_API_KEY")
+        inconvo_agent_id = _require_env("INCONVO_AGENT_ID")
+
+        session = await _get_or_create_session(
+            session_id=session_id,
+            anthropic_api_key=anthropic_api_key,
+            inconvo_api_key=inconvo_api_key,
+            inconvo_agent_id=inconvo_agent_id,
         )
 
         tool_calls: list[ToolCall] = []
 
         def _logger(record: dict[str, Any]) -> None:
             tool_calls.append(ToolCall(**record))
-            logger.info("[%s] tool call: %s", request_id, record.get("name"))
+            logger.info(
+                "[%s] tool call: %s input=%s",
+                request_id,
+                record.get("name"),
+                record.get("input"),
+            )
 
-        options.on_tool_call = _logger
+        async with session.lock:
+            session.tools_options.on_tool_call = _logger
+            try:
+                logger.info(
+                    "[%s] running turn session=%s data_conversation=%s",
+                    request_id,
+                    session_id,
+                    session.tools_options.conversation_id or "<none>",
+                )
+                assistant_text = await asyncio.wait_for(
+                    _run_claude_turn(session, text),
+                    timeout=CHAT_TIMEOUT_SECONDS,
+                )
+            finally:
+                session.tools_options.on_tool_call = None
 
-        logger.info("[%s] creating MCP server", request_id)
-        custom_server = create_inconvo_data_agent_server(options, server_name=SERVER_NAME)
-        agent_options = _build_agent_options(custom_server, anthropic_api_key)
-        prompt = _build_prompt(request.messages)
-        logger.info("[%s] executing Claude query", request_id)
-        assistant_text = await asyncio.wait_for(
-            _run_claude_query(prompt, agent_options),
-            timeout=CHAT_TIMEOUT_SECONDS,
+        logger.info(
+            "[%s] turn complete session=%s data_conversation=%s",
+            request_id,
+            session_id,
+            session.tools_options.conversation_id or "<none>",
         )
-        logger.info("[%s] Claude query complete", request_id)
 
         return ChatResponse(
             assistant_text=assistant_text,
             tool_calls=tool_calls,
+            session_id=session_id,
+            conversation_id=session.tools_options.conversation_id,
         )
     except asyncio.TimeoutError as exc:
         logger.exception("[%s] timed out after %.0f seconds", request_id, CHAT_TIMEOUT_SECONDS)
@@ -234,14 +296,14 @@ async def chat(request: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover - network/sdk error path
         logger.exception("[%s] chat processing failed", request_id)
-        error_text = str(exc)
-        if "ProcessTransport is not ready for writing" in error_text:
-            raise HTTPException(
-                status_code=500,
-                detail=(
-                    "Claude CLI transport closed during SDK MCP handling. "
-                    "Verify ANTHROPIC_API_KEY and restart. "
-                    "If it persists, remove stale Claude config and retry."
-                ),
-            ) from exc
         raise HTTPException(status_code=500, detail=f"Chat processing failed: {exc}") from exc
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    for session_id, session in list(_SESSIONS.items()):
+        try:
+            await session.client.disconnect()
+        except Exception:
+            logger.exception("failed to close session %s", session_id)
+    _SESSIONS.clear()

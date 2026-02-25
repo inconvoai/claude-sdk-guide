@@ -21,6 +21,8 @@ DEFAULT_MESSAGE_DATA_AGENT_DESCRIPTION = "\n".join(
         "Do not repeat information already provided by the analyst in your user message.",
         "Do not define any metrics or calculations yourself; the data agent is the source of truth.",
         "If there is a question about how something from the data analyst was calculated, ask the analyst directly.",
+        "Conversation policy: reuse the active data-agent conversation for follow-up requests.",
+        "Use start_data_agent_conversation only to initialize a conversation when none exists.",
     ]
 )
 
@@ -56,6 +58,36 @@ def _as_tool_text(value: Any) -> str:
         return json.dumps(value, separators=(",", ":"), ensure_ascii=True)
     except TypeError:
         return str(value)
+
+
+def _as_bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "0", "no", "n"}:
+            return False
+    return default
+
+
+def _create_conversation(inconvo: Inconvo, options: InconvoToolsOptions) -> str:
+    if not options.user_identifier:
+        raise ValueError("user_identifier is required.")
+    if not options.user_context:
+        raise ValueError("user_context is required.")
+
+    conversation = inconvo.agents.conversations.create(
+        options.agent_id,
+        user_identifier=options.user_identifier,
+        user_context=options.user_context,
+    )
+    if not conversation or not conversation.id:
+        raise RuntimeError("Failed to start conversation with data analyst.")
+
+    options.conversation_id = conversation.id
+    return conversation.id
 
 
 def get_data_agent_connected_data_summary(options: InconvoToolsOptions):
@@ -112,23 +144,29 @@ def start_data_agent_conversation(options: InconvoToolsOptions):
 
     @tool_decorator(
         "start_data_agent_conversation",
-        "Begin a new data-analyst conversation and return a conversation ID.",
-        {},
+        "Initialize a conversation if one does not exist. Set force_new=true only for a clear topic reset.",
+        {
+            "type": "object",
+            "properties": {
+                "force_new": {
+                    "type": "boolean",
+                    "description": "Set true only when intentionally starting a fresh data-agent conversation.",
+                }
+            },
+            "required": [],
+        },
     )
     async def _tool(args: dict[str, Any]) -> dict[str, Any]:
         tool_name = "start_data_agent_conversation"
         tool_input: dict[str, Any] = args or {}
+        force_new = _as_bool(tool_input.get("force_new"), default=False)
 
         try:
-            conversation = inconvo.agents.conversations.create(
-                options.agent_id,
-                user_identifier=options.user_identifier,
-                user_context=options.user_context,
-            )
-            if not conversation or not conversation.id:
-                result: dict[str, Any] | str = "Failed to start conversation with data analyst."
+            if options.conversation_id and not force_new:
+                result: dict[str, Any] | str = {"conversationId": options.conversation_id}
             else:
-                result = {"conversationId": conversation.id}
+                conversation_id = _create_conversation(inconvo, options)
+                result = {"conversationId": conversation_id}
 
             _emit(
                 options,
@@ -166,27 +204,40 @@ def message_data_agent(options: InconvoToolsOptions):
         "message_data_agent",
         analyst_description,
         {
-            "conversation_id": str,
-            "message": str,
+            "type": "object",
+            "properties": {
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Conversation ID. If omitted, the active conversation is reused.",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "The user's analytics question, short and singular.",
+                },
+            },
+            "required": ["message"],
         },
     )
     async def _tool(args: dict[str, Any]) -> dict[str, Any]:
         conversation_id = str(args.get("conversation_id", "")).strip()
         message = str(args.get("message", "")).strip()
-        if not conversation_id:
-            raise ValueError("conversation_id is required.")
         if not message:
             raise ValueError("message is required.")
 
+        resolved_conversation_id = options.conversation_id or conversation_id
+        if not resolved_conversation_id:
+            resolved_conversation_id = _create_conversation(inconvo, options)
+        options.conversation_id = resolved_conversation_id
+
         tool_name = "message_data_agent"
         tool_input: dict[str, Any] = {
-            "conversation_id": conversation_id,
+            "conversation_id": resolved_conversation_id,
             "message": message,
         }
 
         try:
             response = inconvo.agents.conversations.response.create(
-                conversation_id,
+                resolved_conversation_id,
                 agent_id=options.agent_id,
                 message=message,
             )

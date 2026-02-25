@@ -1,6 +1,7 @@
 # Backend (FastAPI + Claude Agent SDK)
 
 This backend exposes `POST /chat` and wires a local `inconvo_claude_sdk` package into Claude Agent SDK custom tools.
+It keeps a persistent `ClaudeSDKClient` per `session_id` so tool/session context is maintained across turns.
 
 ## Environment
 

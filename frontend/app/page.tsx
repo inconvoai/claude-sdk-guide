@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { InconvoToolResult } from "./components/inconvo";
-import type { ChatRequestMessage, ChatResponse } from "./types/inconvo";
+import type { ChatRequest, ChatResponse, ToolCall } from "./types/inconvo";
 
 type ChatMessage = {
   id: string;
@@ -10,18 +10,48 @@ type ChatMessage = {
   text: string;
   toolResults?: unknown[];
 };
+const SESSION_STORAGE_KEY = "inconvo_chat_session_id";
 
-const toRequestMessages = (messages: ChatMessage[]): ChatRequestMessage[] =>
-  messages.map((message) => ({
-    role: message.role,
-    text: message.text,
-  }));
+const shouldRenderToolCall = (call: ToolCall): boolean => {
+  if (call.name === "start_data_agent_conversation") {
+    return false;
+  }
+
+  if (
+    call.output &&
+    typeof call.output === "object" &&
+    !Array.isArray(call.output)
+  ) {
+    const keys = Object.keys(call.output as Record<string, unknown>);
+    if (keys.length === 1 && keys[0] === "conversationId") {
+      return false;
+    }
+  }
+
+  return true;
+};
 
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    try {
+      const storedSession = window.localStorage.getItem(SESSION_STORAGE_KEY);
+      if (storedSession) {
+        setSessionId(storedSession);
+      } else {
+        const generated = crypto.randomUUID();
+        window.localStorage.setItem(SESSION_STORAGE_KEY, generated);
+        setSessionId(generated);
+      }
+    } catch {
+      // Ignore storage access issues in restricted browser modes.
+    }
+  }, []);
 
   const sendMessage = async () => {
     const trimmed = input.trim();
@@ -40,14 +70,27 @@ export default function Chat() {
     setIsLoading(true);
 
     try {
+      const nextSessionId = sessionId ?? crypto.randomUUID();
+      if (!sessionId) {
+        setSessionId(nextSessionId);
+        try {
+          window.localStorage.setItem(SESSION_STORAGE_KEY, nextSessionId);
+        } catch {
+          // Ignore storage access issues.
+        }
+      }
+
+      const payload: ChatRequest = {
+        text: trimmed,
+        session_id: nextSessionId,
+      };
+
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: {
           "content-type": "application/json",
         },
-        body: JSON.stringify({
-          messages: toRequestMessages(nextMessages),
-        }),
+        body: JSON.stringify(payload),
       });
 
       const data = (await response.json()) as
@@ -63,11 +106,23 @@ export default function Chat() {
       }
 
       const success = data as ChatResponse;
+      if (success.session_id && success.session_id !== sessionId) {
+        setSessionId(success.session_id);
+        try {
+          window.localStorage.setItem(SESSION_STORAGE_KEY, success.session_id);
+        } catch {
+          // Ignore storage access issues.
+        }
+      }
+
       const assistantMessage: ChatMessage = {
         id: crypto.randomUUID(),
         role: "assistant",
         text: success.assistant_text ?? "",
-        toolResults: success.tool_calls?.map((call) => call.output) ?? [],
+        toolResults:
+          success.tool_calls
+            ?.filter(shouldRenderToolCall)
+            .map((call) => call.output) ?? [],
       };
 
       setMessages((prev) => [...prev, assistantMessage]);

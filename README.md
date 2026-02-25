@@ -9,14 +9,17 @@ The UI keeps the same feel as the original Vercel AI SDK example, but chat orche
 
 ## Architecture
 
-1. Browser posts chat history to `frontend/app/api/chat/route.ts`
+1. Browser posts only the latest user message + `session_id` to `frontend/app/api/chat/route.ts`
 2. Next.js proxy forwards to Python backend `POST /chat`
-3. Backend registers 3 Inconvo tools via `create_sdk_mcp_server(...)`
-4. Claude Agent SDK uses those tools during query execution
+3. Backend reuses or creates a persistent `ClaudeSDKClient` for that `session_id`
+4. Backend registers 3 Inconvo tools via `create_sdk_mcp_server(...)` for the session
+5. Claude Agent SDK uses those tools during query execution
+6. Session-scoped tool state keeps the active Inconvo data-agent conversation id across turns
 5. Backend returns:
    - `assistant_text`
    - `tool_calls[]` with structured outputs
-6. Frontend renders assistant text + `InconvoToolResult` cards
+   - `session_id`
+7. Frontend renders assistant text + `InconvoToolResult` cards
 
 ## Project Layout
 

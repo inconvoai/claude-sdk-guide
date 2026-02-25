@@ -24,6 +24,7 @@ class InconvoToolsOptions:
     agent_id: str
     user_identifier: str
     user_context: dict[str, str | int | float | bool]
+    conversation_id: str | None = None
     inconvo: Inconvo | None = None
     message_description: str | None = None
     on_tool_call: ToolCallLogger | None = None

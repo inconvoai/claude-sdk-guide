@@ -31,7 +31,14 @@ export type ChatRequestMessage = {
   text: string;
 };
 
+export type ChatRequest = {
+  text: string;
+  session_id?: string;
+};
+
 export type ChatResponse = {
   assistant_text: string;
   tool_calls: ToolCall[];
+  session_id: string;
+  conversation_id?: string;
 };
