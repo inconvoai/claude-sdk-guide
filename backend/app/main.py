@@ -18,9 +18,10 @@ from inconvo_claude_sdk import (
     create_inconvo_data_agent_server,
 )
 
-SERVER_NAME = "my-custom-tools"
+SERVER_NAME = "data-analyst-tools"
 DEFAULT_USER_IDENTIFIER = "user-123"
 DEFAULT_USER_CONTEXT: dict[str, str | int | float | bool] = {"organisationId": 1}
+CLAUDE_MODEL = "claude-sonnet-4-6"
 CHAT_TIMEOUT_SECONDS = float(os.getenv("CHAT_TIMEOUT_SECONDS", "120"))
 SYSTEM_PROMPT = "\n".join(
     [
@@ -93,8 +94,10 @@ def _build_agent_options(custom_server: Any, anthropic_api_key: str) -> Any:
     from claude_agent_sdk import ClaudeAgentOptions
 
     return ClaudeAgentOptions(
+        tools=[],
         mcp_servers={SERVER_NAME: custom_server},
         allowed_tools=allowed_tool_names(SERVER_NAME),
+        model=CLAUDE_MODEL,
         system_prompt=SYSTEM_PROMPT,
         env={
             "ANTHROPIC_API_KEY": anthropic_api_key,

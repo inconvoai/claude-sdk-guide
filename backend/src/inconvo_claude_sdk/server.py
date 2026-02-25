@@ -7,7 +7,7 @@ from .tools import (
 )
 from .types import InconvoToolsOptions
 
-DEFAULT_SERVER_NAME = "my-custom-tools"
+DEFAULT_SERVER_NAME = "data-analyst-tools"
 
 
 def sdk_tool_names() -> list[str]:
