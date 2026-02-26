@@ -91,12 +91,7 @@ def _ensure_claude_home() -> str:
 
 
 async def _run_claude_turn(session: ClaudeChatSession, prompt: str) -> str:
-    import logging
-    import time
-
     from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
-
-    logger = logging.getLogger("uvicorn.error")
 
     await session.client.query(prompt)
 
@@ -104,14 +99,8 @@ async def _run_claude_turn(session: ClaudeChatSession, prompt: str) -> str:
     final_result: ResultMessage | None = None
 
     async for message in session.client.receive_response():
-        msg_type = type(message).__name__
-        logger.info("[%.3f] message: %s", time.time(), msg_type)
         if isinstance(message, AssistantMessage):
             for block in message.content:
-                block_type = getattr(block, "type", None)
-                block_name = getattr(block, "name", None)
-                block_input = getattr(block, "input", None)
-                logger.info("  block: type=%s name=%s input=%s", block_type, block_name, block_input)
                 if isinstance(block, TextBlock):
                     chunks.append(block.text)
         elif isinstance(message, ResultMessage):
@@ -145,11 +134,7 @@ async def _create_session(
     anthropic_api_key: str,
     inconvo_agent_id: str,
 ) -> ClaudeChatSession:
-    import logging
-
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
-
-    logger = logging.getLogger("uvicorn.error")
 
     _require_env("INCONVO_API_KEY")
 
@@ -159,11 +144,7 @@ async def _create_session(
         user_context={"orgId": 1},
     )
 
-    def _on_stderr(line: str) -> None:
-        logger.info("[CLI stderr] %s", line.rstrip())
-
     agent_options = ClaudeAgentOptions(
-        tools=None,
         mcp_servers={
             INCONVO_SERVER: data_agent,
         },
@@ -175,16 +156,11 @@ async def _create_session(
         agents=inconvo_data_agent_definition(),
         model=CLAUDE_MODEL,
         system_prompt=SYSTEM_PROMPT,
-        stderr=_on_stderr,
         env={
             "ANTHROPIC_API_KEY": anthropic_api_key,
             "HOME": _ensure_claude_home(),
         },
     )
-
-    logger.info("Registered agents: %s", list(agent_options.agents.keys()) if agent_options.agents else "None")
-    logger.info("Allowed tools: %s", agent_options.allowed_tools)
-    logger.info("MCP servers: %s", list(agent_options.mcp_servers.keys()))
 
     client = ClaudeSDKClient(agent_options)
     await client.connect()
