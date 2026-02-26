@@ -17,6 +17,7 @@ class ToolCallRecord(TypedDict):
 
 
 ToolCallLogger = Callable[[ToolCallRecord], None]
+StreamingChunkCallback = Callable[[str, str], None]  # (conversation_id, progress_message)
 
 
 @dataclass
@@ -32,6 +33,7 @@ class InconvoToolsOptions:
 class InconvoToolsState:
     conversation_ids: list[str] = field(default_factory=list)
     on_tool_call: ToolCallLogger | None = None
+    on_streaming_chunk: StreamingChunkCallback | None = None
 
     @property
     def conversation_id(self) -> str | None:
