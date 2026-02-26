@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, TypedDict
 
-from inconvo import Inconvo
+from inconvo import AsyncInconvo
 
 JsonPrimitive = str | int | float | bool | None
 JsonValue = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
@@ -24,11 +24,16 @@ class InconvoToolsOptions:
     agent_id: str
     user_identifier: str
     user_context: dict[str, str | int | float | bool]
-    inconvo: Inconvo | None = None
+    inconvo: AsyncInconvo | None = None
     message_description: str | None = None
 
 
 @dataclass
 class InconvoToolsState:
-    conversation_id: str | None = None
+    conversation_ids: list[str] = field(default_factory=list)
     on_tool_call: ToolCallLogger | None = None
+
+    @property
+    def conversation_id(self) -> str | None:
+        """Most recently created conversation ID, for backwards compat."""
+        return self.conversation_ids[-1] if self.conversation_ids else None

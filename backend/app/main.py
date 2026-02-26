@@ -12,9 +12,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from inconvo_claude_sdk import (
+    DATA_AGENT_SUBAGENT_NAME,
     INCONVO_SERVER,
-    inconvo_allowed_tools,
     inconvo_data_agent,
+    inconvo_data_agent_definition,
 )
 
 CLAUDE_MODEL = "claude-sonnet-4-6"
@@ -24,9 +25,12 @@ SYSTEM_PROMPT = "\n".join(
         "When you receive structured data (tables, charts) from tools, do NOT recreate or reformat them as markdown tables in your response.",
         "The tool output is rendered directly as UI.",
         "You may provide brief context and insights, but never duplicate data from tool output.",
-        "Conversation policy: reuse the same data-analyst conversation for follow-up requests.",
-        "Only replace the conversation when there is a clear topic reset.",
-        "When replacing, call start_data_agent_conversation with force_new=true.",
+        "Before your first data question, call get_data_agent_connected_data_summary to understand what data is available.",
+        "Use this summary as internal context — don't include it in your response unless the user asks about available data.",
+        "Use this context to write better, more specific tasks for the subagents.",
+        f"You MUST use the Task tool to delegate data questions to the '{DATA_AGENT_SUBAGENT_NAME}' subagent.",
+        "Do NOT call start_data_agent_conversation or message_data_agent directly — those are only available to the subagent.",
+        "For multiple independent questions, spawn one subagent per question so they run in parallel.",
     ]
 )
 
@@ -87,7 +91,12 @@ def _ensure_claude_home() -> str:
 
 
 async def _run_claude_turn(session: ClaudeChatSession, prompt: str) -> str:
+    import logging
+    import time
+
     from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+    logger = logging.getLogger("uvicorn.error")
 
     await session.client.query(prompt)
 
@@ -95,8 +104,14 @@ async def _run_claude_turn(session: ClaudeChatSession, prompt: str) -> str:
     final_result: ResultMessage | None = None
 
     async for message in session.client.receive_response():
+        msg_type = type(message).__name__
+        logger.info("[%.3f] message: %s", time.time(), msg_type)
         if isinstance(message, AssistantMessage):
             for block in message.content:
+                block_type = getattr(block, "type", None)
+                block_name = getattr(block, "name", None)
+                block_input = getattr(block, "input", None)
+                logger.info("  block: type=%s name=%s input=%s", block_type, block_name, block_input)
                 if isinstance(block, TextBlock):
                     chunks.append(block.text)
         elif isinstance(message, ResultMessage):
@@ -109,38 +124,74 @@ async def _run_claude_turn(session: ClaudeChatSession, prompt: str) -> str:
     return "\n".join(chunk for chunk in chunks if chunk).strip()
 
 
+async def _permission_handler(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    _context: Any,
+) -> Any:
+    """Allow MCP tools (needed by subagents), deny everything else."""
+    from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+    prefix = f"mcp__{INCONVO_SERVER}__"
+    if tool_name.startswith(prefix):
+        return PermissionResultAllow(updated_input=tool_input)
+
+    return PermissionResultDeny(
+        reason=f"Tool '{tool_name}' is not available. Use the Task tool to delegate to the {DATA_AGENT_SUBAGENT_NAME} subagent."
+    )
+
+
 async def _create_session(
     anthropic_api_key: str,
     inconvo_agent_id: str,
 ) -> ClaudeChatSession:
+    import logging
+
     from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+
+    logger = logging.getLogger("uvicorn.error")
 
     _require_env("INCONVO_API_KEY")
 
+    data_agent = inconvo_data_agent(
+        agent_id=inconvo_agent_id,
+        user_identifier="user-123",
+        user_context={"orgId": 1},
+    )
+
+    def _on_stderr(line: str) -> None:
+        logger.info("[CLI stderr] %s", line.rstrip())
+
     agent_options = ClaudeAgentOptions(
-        tools=[],
+        tools=None,
         mcp_servers={
-            INCONVO_SERVER: inconvo_data_agent(
-                agent_id=inconvo_agent_id,
-                user_identifier="user-123",
-                user_context={"organisationId": 1},
-            )
+            INCONVO_SERVER: data_agent,
         },
-        allowed_tools=inconvo_allowed_tools(),
+        allowed_tools=[
+            "Task",
+            f"mcp__{INCONVO_SERVER}__get_data_agent_connected_data_summary",
+        ],
+        can_use_tool=_permission_handler,
+        agents=inconvo_data_agent_definition(),
         model=CLAUDE_MODEL,
         system_prompt=SYSTEM_PROMPT,
+        stderr=_on_stderr,
         env={
             "ANTHROPIC_API_KEY": anthropic_api_key,
             "HOME": _ensure_claude_home(),
         },
     )
 
+    logger.info("Registered agents: %s", list(agent_options.agents.keys()) if agent_options.agents else "None")
+    logger.info("Allowed tools: %s", agent_options.allowed_tools)
+    logger.info("MCP servers: %s", list(agent_options.mcp_servers.keys()))
+
     client = ClaudeSDKClient(agent_options)
     await client.connect()
 
     return ClaudeChatSession(
         client=client,
-        data_agent=agent_options.mcp_servers[INCONVO_SERVER],
+        data_agent=data_agent,
     )
 
 

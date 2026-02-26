@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from inconvo import Inconvo
+from inconvo import AsyncInconvo
 
 from .tools import (
     get_data_agent_connected_data_summary,
@@ -13,14 +13,51 @@ from .types import InconvoToolsOptions, InconvoToolsState, ToolCallLogger
 
 INCONVO_SERVER = "data-analyst"
 
+DATA_AGENT_SUBAGENT_NAME = "data-analyst-agent"
+
+DATA_AGENT_SUBAGENT_PROMPT = "\n".join(
+    [
+        "You answer data questions by talking to the Inconvo data agent.",
+        "1) If you don't already know what data is available, call get_data_agent_connected_data_summary first.",
+        "2) Call start_data_agent_conversation to create a conversation.",
+        "3) Call message_data_agent with the returned conversation_id and a direct, specific question.",
+        "4) Review the response. If the answer is incomplete or you need a follow-up, send another message to the same conversation.",
+        "   You may send multiple messages in one conversation — each should be a single, concrete question.",
+        "5) Once you have a complete answer, return the analyst's data verbatim — do not reformat tables or charts.",
+        "",
+        "Rules:",
+        "- Be direct: ask exactly what you need. No preamble, no filler, no open-ended exploration.",
+        "- One question per message. Never bundle multiple questions together.",
+        "- Use precise constraints: time ranges, filters, top/bottom N, sort order.",
+        "- Do not guess column names, metrics, or schema — let the analyst resolve those.",
+        "- Do not ask the analyst to explain methodology unless the user specifically asked for it.",
+    ]
+)
+
 
 def inconvo_allowed_tools(server_name: str = INCONVO_SERVER) -> list[str]:
+    """All MCP tool names for this server."""
     prefix = f"mcp__{server_name}__"
     return [
         f"{prefix}get_data_agent_connected_data_summary",
         f"{prefix}start_data_agent_conversation",
         f"{prefix}message_data_agent",
     ]
+
+
+def inconvo_data_agent_definition(
+    server_name: str = INCONVO_SERVER,
+) -> dict[str, Any]:
+    """Return an AgentDefinition dict for the data-analyst subagent."""
+    from claude_agent_sdk import AgentDefinition
+
+    return {
+        DATA_AGENT_SUBAGENT_NAME: AgentDefinition(
+            description="Answers a single data question by talking to the Inconvo data agent. Use for parallel independent questions.",
+            prompt=DATA_AGENT_SUBAGENT_PROMPT,
+            tools=inconvo_allowed_tools(server_name),
+        ),
+    }
 
 
 async def allow_all_tools(
@@ -62,6 +99,10 @@ class InconvoDataAgentServer(dict[str, Any]):
     def conversation_id(self) -> str | None:
         return self._state.conversation_id
 
+    @property
+    def conversation_ids(self) -> list[str]:
+        return list(self._state.conversation_ids)
+
     def set_tool_call_logger(self, logger: ToolCallLogger | None) -> None:
         self._state.on_tool_call = logger
 
@@ -74,7 +115,7 @@ def inconvo_data_agent(
     agent_id: str,
     user_identifier: str,
     user_context: dict[str, str | int | float | bool],
-    inconvo: Inconvo | None = None,
+    inconvo: AsyncInconvo | None = None,
     message_description: str | None = None,
     server_name: str = INCONVO_SERVER,
 ) -> InconvoDataAgentServer:
