@@ -47,15 +47,29 @@ def inconvo_allowed_tools(server_name: str = INCONVO_SERVER) -> list[str]:
 
 def inconvo_data_agent_definition(
     server_name: str = INCONVO_SERVER,
+    tools: list[str] | None = None,
+    max_messages_per_conversation: int | None = None,
 ) -> dict[str, Any]:
-    """Return an AgentDefinition dict for the data-analyst subagent."""
+    """Return an AgentDefinition dict for the data-analyst subagent.
+
+    Pass ``tools`` to explicitly control which MCP tools the subagent can use.
+    Pass ``max_messages_per_conversation`` to append a hard-limit instruction to the prompt.
+    """
     from claude_agent_sdk import AgentDefinition
+
+    prompt = DATA_AGENT_SUBAGENT_PROMPT
+    if max_messages_per_conversation is not None:
+        prompt += (
+            f"\nYou have a hard limit of {max_messages_per_conversation} message(s) per conversation. "
+            "Plan your question carefully and get the answer within that limit. "
+            "If you are close to the limit, return the best answer you have rather than asking a follow-up."
+        )
 
     return {
         DATA_AGENT_SUBAGENT_NAME: AgentDefinition(
             description="Answers a single data question by talking to the Inconvo data agent. Use for parallel independent questions.",
-            prompt=DATA_AGENT_SUBAGENT_PROMPT,
-            tools=inconvo_allowed_tools(server_name),
+            prompt=prompt,
+            tools=tools if tools is not None else inconvo_allowed_tools(server_name),
         ),
     }
 
@@ -124,6 +138,7 @@ def inconvo_data_agent(
     inconvo: AsyncInconvo | None = None,
     message_description: str | None = None,
     server_name: str = INCONVO_SERVER,
+    max_messages_per_conversation: int = 5,
 ) -> InconvoDataAgentServer:
     state = InconvoToolsState()
     options = InconvoToolsOptions(
@@ -132,6 +147,7 @@ def inconvo_data_agent(
         user_context=user_context,
         inconvo=inconvo,
         message_description=message_description,
+        max_messages_per_conversation=max_messages_per_conversation,
     )
 
     server = _create_inconvo_data_agent_server(

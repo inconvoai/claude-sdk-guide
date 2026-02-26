@@ -118,7 +118,7 @@ export default function Chat() {
               setLoadingItems((prev) =>
                 prev.map((item) =>
                   item.conversationId === convId
-                    ? { ...item, progress: msg }
+                    ? { ...item, progress: msg, completed: false }
                     : item,
                 ),
               );
@@ -203,7 +203,11 @@ export default function Chat() {
           <div className="p-4 text-sm text-zinc-500">
             <div className="flex items-center gap-2">
               <div className="animate-spin h-4 w-4 shrink-0 border-2 border-zinc-300 border-t-zinc-600 rounded-full" />
-              <span>Querying your data...</span>
+              <span>
+                {loadingItems.length > 0 && loadingItems.every((i) => i.completed)
+                  ? "Writing response..."
+                  : "Querying your data..."}
+              </span>
             </div>
             {loadingItems.length > 0 && (
               <ul className="mt-2 ml-6 space-y-1 text-xs text-zinc-400">

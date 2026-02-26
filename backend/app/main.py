@@ -20,8 +20,22 @@ from inconvo_claude_sdk import (
     inconvo_data_agent_definition,
 )
 
-CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 CHAT_TIMEOUT_SECONDS = float(os.getenv("CHAT_TIMEOUT_SECONDS", "120"))
+
+SUBAGENT_MAX_MESSAGES = 5  # hard limit on message_data_agent calls per conversation
+
+# Tools available to the main orchestrator agent
+MAIN_AGENT_TOOLS = [
+    "Task",
+    f"mcp__{INCONVO_SERVER}__get_data_agent_connected_data_summary",
+]
+
+# Tools available to the data-analyst subagent
+SUBAGENT_TOOLS = [
+    f"mcp__{INCONVO_SERVER}__start_data_agent_conversation",
+    f"mcp__{INCONVO_SERVER}__message_data_agent",
+]
 SYSTEM_PROMPT = "\n".join(
     [
         "When you receive structured data (tables, charts) from tools, do NOT recreate or reformat them as markdown tables in your response.",
@@ -147,18 +161,19 @@ async def _create_session(
         agent_id=inconvo_agent_id,
         user_identifier="user-123",
         user_context={"orgId": 1},
+        max_messages_per_conversation=SUBAGENT_MAX_MESSAGES,
     )
 
     agent_options = ClaudeAgentOptions(
         mcp_servers={
             INCONVO_SERVER: data_agent,
         },
-        allowed_tools=[
-            "Task",
-            f"mcp__{INCONVO_SERVER}__get_data_agent_connected_data_summary",
-        ],
+        allowed_tools=MAIN_AGENT_TOOLS,
         can_use_tool=_permission_handler,
-        agents=inconvo_data_agent_definition(),
+        agents=inconvo_data_agent_definition(
+            tools=SUBAGENT_TOOLS,
+            max_messages_per_conversation=SUBAGENT_MAX_MESSAGES,
+        ),
         model=CLAUDE_MODEL,
         system_prompt=SYSTEM_PROMPT,
         include_partial_messages=True,

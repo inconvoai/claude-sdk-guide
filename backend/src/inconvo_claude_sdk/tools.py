@@ -240,6 +240,16 @@ def message_data_agent(
             "message": message,
         }
 
+        count = resolved_state.message_counts.get(resolved_conversation_id, 0) + 1
+        resolved_state.message_counts[resolved_conversation_id] = count
+        if count > options.max_messages_per_conversation:
+            limit_msg = (
+                f"You have reached the {options.max_messages_per_conversation}-message "
+                "limit for this conversation. Stop now and return the best answer you have."
+            )
+            _emit(resolved_state, {"name": tool_name, "input": tool_input, "output": limit_msg, "is_error": False})
+            return {"content": [{"type": "text", "text": limit_msg}]}
+
         try:
             stream = await inconvo.agents.conversations.response.create(
                 resolved_conversation_id,
