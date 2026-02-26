@@ -12,7 +12,10 @@ type ChatMessage = {
 };
 
 const shouldRenderToolCall = (call: ToolCall): boolean => {
-  if (call.name === "start_data_agent_conversation") {
+  if (
+    call.name === "start_data_agent_conversation" ||
+    call.name === "get_data_summary"
+  ) {
     return false;
   }
 

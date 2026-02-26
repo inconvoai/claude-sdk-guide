@@ -138,6 +138,9 @@ async def _create_session(
 
     _require_env("INCONVO_API_KEY")
 
+    # You can get the user context values 
+    # from your JWT or whatever mechanism you have 
+    # to identify your users server side
     data_agent = inconvo_data_agent(
         agent_id=inconvo_agent_id,
         user_identifier="user-123",
