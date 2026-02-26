@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from inconvo_claude_sdk import (
     DATA_AGENT_SUBAGENT_NAME,
     INCONVO_SERVER,
-    inconvo_allowed_tools,
+    allow_all_tools,
     inconvo_data_agent,
     inconvo_data_agent_definition,
 )
@@ -26,8 +26,10 @@ SYSTEM_PROMPT = "\n".join(
         "When you receive structured data (tables, charts) from tools, do NOT recreate or reformat them as markdown tables in your response.",
         "The tool output is rendered directly as UI.",
         "You may provide brief context and insights, but never duplicate data from tool output.",
-        f"For a single data question, call the MCP tools (start_data_agent_conversation, message_data_agent) directly.",
-        f"For multiple independent data questions, delegate each to the '{DATA_AGENT_SUBAGENT_NAME}' subagent so they run in parallel.",
+        "Before your first data question, call get_data_agent_connected_data_summary to understand what data is available.",
+        "Use this context to write better, more specific tasks for the subagents.",
+        f"Delegate all data questions to the '{DATA_AGENT_SUBAGENT_NAME}' subagent.",
+        "For multiple independent questions, spawn one subagent per question so they run in parallel.",
     ]
 )
 
@@ -127,7 +129,8 @@ async def _create_session(
                 user_context={"orgId": 1},
             )
         },
-        allowed_tools=inconvo_allowed_tools(),
+        allowed_tools=[f"mcp__{INCONVO_SERVER}__get_data_agent_connected_data_summary"],
+        can_use_tool=allow_all_tools,
         agents=inconvo_data_agent_definition(),
         model=CLAUDE_MODEL,
         system_prompt=SYSTEM_PROMPT,

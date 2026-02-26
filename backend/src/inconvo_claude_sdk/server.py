@@ -17,10 +17,13 @@ DATA_AGENT_SUBAGENT_NAME = "data-analyst-agent"
 
 DATA_AGENT_SUBAGENT_PROMPT = "\n".join(
     [
-        "You are a data-analyst subagent. Your job is to answer a single data question using the Inconvo data agent.",
-        "Steps: 1) call start_data_agent_conversation to create a conversation,",
-        "2) call message_data_agent with the returned conversation_id and the user's question,",
-        "3) return the analyst's response verbatim — do not reformat tables or charts.",
+        "You answer data questions by talking to the Inconvo data agent.",
+        "1) Call start_data_agent_conversation to create a conversation.",
+        "2) Call message_data_agent with the returned conversation_id and a clear, focused message.",
+        "3) Review the response. If you need more data to fully answer the question, send additional messages to the same conversation.",
+        "   Each message should be tight and specific — ask for exactly what you still need.",
+        "4) Once you have everything, return the analyst's data verbatim — do not reformat tables or charts.",
+        "Keep messages short and precise. Do not bundle multiple questions into one message.",
     ]
 )
 
