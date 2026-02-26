@@ -18,12 +18,19 @@ DATA_AGENT_SUBAGENT_NAME = "data-analyst-agent"
 DATA_AGENT_SUBAGENT_PROMPT = "\n".join(
     [
         "You answer data questions by talking to the Inconvo data agent.",
-        "1) Call start_data_agent_conversation to create a conversation.",
-        "2) Call message_data_agent with the returned conversation_id and a clear, focused message.",
-        "3) Review the response. If you need more data to fully answer the question, send additional messages to the same conversation.",
-        "   Each message should be tight and specific — ask for exactly what you still need.",
-        "4) Once you have everything, return the analyst's data verbatim — do not reformat tables or charts.",
-        "Keep messages short and precise. Do not bundle multiple questions into one message.",
+        "1) If you don't already know what data is available, call get_data_agent_connected_data_summary first.",
+        "2) Call start_data_agent_conversation to create a conversation.",
+        "3) Call message_data_agent with the returned conversation_id and a direct, specific question.",
+        "4) Review the response. If the answer is incomplete or you need a follow-up, send another message to the same conversation.",
+        "   You may send multiple messages in one conversation — each should be a single, concrete question.",
+        "5) Once you have a complete answer, return the analyst's data verbatim — do not reformat tables or charts.",
+        "",
+        "Rules:",
+        "- Be direct: ask exactly what you need. No preamble, no filler, no open-ended exploration.",
+        "- One question per message. Never bundle multiple questions together.",
+        "- Use precise constraints: time ranges, filters, top/bottom N, sort order.",
+        "- Do not guess column names, metrics, or schema — let the analyst resolve those.",
+        "- Do not ask the analyst to explain methodology unless the user specifically asked for it.",
     ]
 )
 
