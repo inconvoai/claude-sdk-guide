@@ -22,8 +22,8 @@ DEFAULT_MESSAGE_DATA_AGENT_DESCRIPTION = "\n".join(
         "Do not repeat information already provided by the analyst in your user message.",
         "Do not define any metrics or calculations yourself; the data agent is the source of truth.",
         "If there is a question about how something from the data analyst was calculated, ask the analyst directly.",
-        "Conversation policy: reuse the active data-agent conversation for follow-up requests.",
-        "Use start_data_agent_conversation only to initialize a conversation when none exists.",
+        "You may run multiple independent data-agent conversations in parallel.",
+        "Each call to start_data_agent_conversation creates a new conversation; pass its conversation_id to message_data_agent.",
     ]
 )
 
@@ -61,18 +61,6 @@ def _as_tool_text(value: Any) -> str:
         return str(value)
 
 
-def _as_bool(value: Any, *, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"true", "1", "yes", "y"}:
-            return True
-        if normalized in {"false", "0", "no", "n"}:
-            return False
-    return default
-
-
 def _resolve_inconvo(options: InconvoToolsOptions) -> AsyncInconvo:
     if options.inconvo:
         return options.inconvo
@@ -101,7 +89,7 @@ async def _create_conversation(
     if not conversation or not conversation.id:
         raise RuntimeError("Failed to start conversation with data analyst.")
 
-    state.conversation_id = conversation.id
+    state.conversation_ids.append(conversation.id)
     return conversation.id
 
 
@@ -167,29 +155,20 @@ def start_data_agent_conversation(
 
     @tool_decorator(
         "start_data_agent_conversation",
-        "Initialize a conversation if one does not exist. Set force_new=true only for a clear topic reset.",
+        "Start a new data-agent conversation. Each call creates an independent conversation and returns its ID.",
         {
             "type": "object",
-            "properties": {
-                "force_new": {
-                    "type": "boolean",
-                    "description": "Set true only when intentionally starting a fresh data-agent conversation.",
-                }
-            },
+            "properties": {},
             "required": [],
         },
     )
     async def _tool(args: dict[str, Any]) -> dict[str, Any]:
         tool_name = "start_data_agent_conversation"
         tool_input: dict[str, Any] = args or {}
-        force_new = _as_bool(tool_input.get("force_new"), default=False)
 
         try:
-            if resolved_state.conversation_id and not force_new:
-                result: dict[str, Any] | str = {"conversationId": resolved_state.conversation_id}
-            else:
-                conversation_id = await _create_conversation(inconvo, options, resolved_state)
-                result = {"conversationId": conversation_id}
+            conversation_id = await _create_conversation(inconvo, options, resolved_state)
+            result: dict[str, Any] = {"conversationId": conversation_id}
 
             _emit(
                 resolved_state,
@@ -254,7 +233,6 @@ def message_data_agent(
         resolved_conversation_id = conversation_id or resolved_state.conversation_id
         if not resolved_conversation_id:
             resolved_conversation_id = await _create_conversation(inconvo, options, resolved_state)
-        resolved_state.conversation_id = resolved_conversation_id
 
         tool_name = "message_data_agent"
         tool_input: dict[str, Any] = {

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, TypedDict
 
 from inconvo import AsyncInconvo
@@ -30,5 +30,10 @@ class InconvoToolsOptions:
 
 @dataclass
 class InconvoToolsState:
-    conversation_id: str | None = None
+    conversation_ids: list[str] = field(default_factory=list)
     on_tool_call: ToolCallLogger | None = None
+
+    @property
+    def conversation_id(self) -> str | None:
+        """Most recently created conversation ID, for backwards compat."""
+        return self.conversation_ids[-1] if self.conversation_ids else None

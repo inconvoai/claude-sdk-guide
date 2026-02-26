@@ -12,9 +12,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from inconvo_claude_sdk import (
+    DATA_AGENT_SUBAGENT_NAME,
     INCONVO_SERVER,
     inconvo_allowed_tools,
     inconvo_data_agent,
+    inconvo_data_agent_definition,
 )
 
 CLAUDE_MODEL = "claude-sonnet-4-6"
@@ -24,9 +26,8 @@ SYSTEM_PROMPT = "\n".join(
         "When you receive structured data (tables, charts) from tools, do NOT recreate or reformat them as markdown tables in your response.",
         "The tool output is rendered directly as UI.",
         "You may provide brief context and insights, but never duplicate data from tool output.",
-        "Conversation policy: reuse the same data-analyst conversation for follow-up requests.",
-        "Only replace the conversation when there is a clear topic reset.",
-        "When replacing, call start_data_agent_conversation with force_new=true.",
+        f"For a single data question, call the MCP tools (start_data_agent_conversation, message_data_agent) directly.",
+        f"For multiple independent data questions, delegate each to the '{DATA_AGENT_SUBAGENT_NAME}' subagent so they run in parallel.",
     ]
 )
 
@@ -123,10 +124,11 @@ async def _create_session(
             INCONVO_SERVER: inconvo_data_agent(
                 agent_id=inconvo_agent_id,
                 user_identifier="user-123",
-                user_context={"organisationId": 1},
+                user_context={"orgId": 1},
             )
         },
         allowed_tools=inconvo_allowed_tools(),
+        agents=inconvo_data_agent_definition(),
         model=CLAUDE_MODEL,
         system_prompt=SYSTEM_PROMPT,
         env={
