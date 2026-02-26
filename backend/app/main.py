@@ -27,6 +27,7 @@ SYSTEM_PROMPT = "\n".join(
         "The tool output is rendered directly as UI.",
         "You may provide brief context and insights, but never duplicate data from tool output.",
         "Before your first data question, call get_data_agent_connected_data_summary to understand what data is available.",
+        "Use this summary as internal context — don't include it in your response unless the user asks about available data.",
         "Use this context to write better, more specific tasks for the subagents.",
         f"Delegate all data questions to the '{DATA_AGENT_SUBAGENT_NAME}' subagent.",
         "For multiple independent questions, spawn one subagent per question so they run in parallel.",
@@ -90,7 +91,12 @@ def _ensure_claude_home() -> str:
 
 
 async def _run_claude_turn(session: ClaudeChatSession, prompt: str) -> str:
+    import logging
+    import time
+
     from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+
+    logger = logging.getLogger("claude_turn")
 
     await session.client.query(prompt)
 
@@ -98,8 +104,13 @@ async def _run_claude_turn(session: ClaudeChatSession, prompt: str) -> str:
     final_result: ResultMessage | None = None
 
     async for message in session.client.receive_response():
+        msg_type = type(message).__name__
+        logger.info("[%.3f] message: %s", time.time(), msg_type)
         if isinstance(message, AssistantMessage):
             for block in message.content:
+                block_type = getattr(block, "type", None)
+                block_name = getattr(block, "name", None)
+                logger.info("  block: type=%s name=%s", block_type, block_name)
                 if isinstance(block, TextBlock):
                     chunks.append(block.text)
         elif isinstance(message, ResultMessage):
@@ -129,7 +140,7 @@ async def _create_session(
                 user_context={"orgId": 1},
             )
         },
-        allowed_tools=[f"mcp__{INCONVO_SERVER}__get_data_agent_connected_data_summary"],
+        allowed_tools=["Task", f"mcp__{INCONVO_SERVER}__get_data_agent_connected_data_summary"],
         can_use_tool=allow_all_tools,
         agents=inconvo_data_agent_definition(),
         model=CLAUDE_MODEL,
