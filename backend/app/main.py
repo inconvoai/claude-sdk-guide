@@ -160,7 +160,7 @@ async def _create_session(
     data_agent = inconvo_data_agent(
         agent_id=inconvo_agent_id,
         user_identifier="user-123",
-        user_context={"orgId": 1},
+        user_context={"organisationId": 1},
         max_messages_per_conversation=SUBAGENT_MAX_MESSAGES,
     )
 

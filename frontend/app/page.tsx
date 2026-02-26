@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { InconvoToolResult } from "./components/inconvo";
 import type { ChatRequest, ChatResponse, ToolCall } from "./types/inconvo";
 
@@ -36,12 +36,24 @@ const shouldRenderToolCall = (call: ToolCall): boolean => {
 export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingItems, setLoadingItems] = useState<
     Array<{ description: string; conversationId?: string; progress?: string; completed?: boolean }>
   >([]);
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    const textarea = inputRef.current;
+    if (!textarea) return;
+
+    textarea.style.height = "0px";
+    const maxHeight = 192;
+    const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, [input]);
 
   const sendMessage = async () => {
     const trimmed = input.trim();
@@ -237,12 +249,20 @@ export default function Chat() {
           await sendMessage();
         }}
       >
-        <input
-          className="fixed dark:bg-zinc-900 bottom-0 w-full max-w-4xl p-2 mb-8 border border-zinc-300 dark:border-zinc-800 rounded shadow-xl"
+        <textarea
+          ref={inputRef}
+          className="fixed dark:bg-zinc-900 bottom-0 w-full max-w-4xl p-2 mb-8 border border-zinc-300 dark:border-zinc-800 rounded shadow-xl min-h-11 max-h-48 resize-none"
           value={input}
           disabled={isLoading}
           placeholder="Say something..."
+          rows={1}
           onChange={(e) => setInput(e.currentTarget.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void sendMessage();
+            }
+          }}
         />
       </form>
     </div>
