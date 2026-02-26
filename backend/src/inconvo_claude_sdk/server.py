@@ -36,6 +36,7 @@ DATA_AGENT_SUBAGENT_PROMPT = "\n".join(
 
 
 def inconvo_allowed_tools(server_name: str = INCONVO_SERVER) -> list[str]:
+    """All MCP tool names for this server."""
     prefix = f"mcp__{server_name}__"
     return [
         f"{prefix}get_data_agent_connected_data_summary",
