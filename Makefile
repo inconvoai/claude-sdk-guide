@@ -59,10 +59,14 @@ backend-dev: ensure-env
 	set -a; [ -f .env ] && source .env; set +a; \
 	if [ "$(RELOAD)" = "1" ]; then RELOAD_ARG="--reload"; else RELOAD_ARG=""; fi; \
 	if command -v uv >/dev/null 2>&1; then \
-		uv run uvicorn app.main:app --host 127.0.0.1 --port $(PORT) --log-level $(LOG_LEVEL) $$RELOAD_ARG; \
-	elif [ -x .venv/bin/uvicorn ]; then \
+		if uv run --no-sync python -c 'import uvicorn' >/dev/null 2>&1; then \
+			uv run --no-sync python -m uvicorn app.main:app --host 127.0.0.1 --port $(PORT) --log-level $(LOG_LEVEL) $$RELOAD_ARG; \
+		else \
+			uv sync && uv run python -m uvicorn app.main:app --host 127.0.0.1 --port $(PORT) --log-level $(LOG_LEVEL) $$RELOAD_ARG; \
+		fi; \
+	elif [ -x .venv/bin/python ]; then \
 		. .venv/bin/activate; \
-		uvicorn app.main:app --host 127.0.0.1 --port $(PORT) --log-level $(LOG_LEVEL) $$RELOAD_ARG; \
+		python -m uvicorn app.main:app --host 127.0.0.1 --port $(PORT) --log-level $(LOG_LEVEL) $$RELOAD_ARG; \
 	else \
 		echo "Backend deps not installed. Run 'make backend-install' first."; \
 		exit 1; \
