@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from inconvo import Inconvo
+from inconvo import AsyncInconvo
 
 from .tools import (
     get_data_agent_connected_data_summary,
@@ -74,7 +74,7 @@ def inconvo_data_agent(
     agent_id: str,
     user_identifier: str,
     user_context: dict[str, str | int | float | bool],
-    inconvo: Inconvo | None = None,
+    inconvo: AsyncInconvo | None = None,
     message_description: str | None = None,
     server_name: str = INCONVO_SERVER,
 ) -> InconvoDataAgentServer:

@@ -4,7 +4,7 @@ import json
 import os
 from typing import Any, Callable
 
-from inconvo import Inconvo
+from inconvo import AsyncInconvo
 
 from .types import InconvoToolsOptions, InconvoToolsState, ToolCallRecord
 
@@ -73,18 +73,18 @@ def _as_bool(value: Any, *, default: bool = False) -> bool:
     return default
 
 
-def _resolve_inconvo(options: InconvoToolsOptions) -> Inconvo:
+def _resolve_inconvo(options: InconvoToolsOptions) -> AsyncInconvo:
     if options.inconvo:
         return options.inconvo
 
     api_key = os.getenv("INCONVO_API_KEY")
     if not api_key:
         raise RuntimeError("Missing INCONVO_API_KEY for default Inconvo client.")
-    return Inconvo(api_key=api_key)
+    return AsyncInconvo(api_key=api_key)
 
 
-def _create_conversation(
-    inconvo: Inconvo,
+async def _create_conversation(
+    inconvo: AsyncInconvo,
     options: InconvoToolsOptions,
     state: InconvoToolsState,
 ) -> str:
@@ -93,7 +93,7 @@ def _create_conversation(
     if not options.user_context:
         raise ValueError("user_context is required.")
 
-    conversation = inconvo.agents.conversations.create(
+    conversation = await inconvo.agents.conversations.create(
         options.agent_id,
         user_identifier=options.user_identifier,
         user_context=options.user_context,
@@ -124,7 +124,7 @@ def get_data_agent_connected_data_summary(
         tool_input: dict[str, Any] = args or {}
 
         try:
-            summary = inconvo.agents.data_summary.retrieve(options.agent_id)
+            summary = await inconvo.agents.data_summary.retrieve(options.agent_id)
             result = summary.data_summary
             _emit(
                 resolved_state,
@@ -188,7 +188,7 @@ def start_data_agent_conversation(
             if resolved_state.conversation_id and not force_new:
                 result: dict[str, Any] | str = {"conversationId": resolved_state.conversation_id}
             else:
-                conversation_id = _create_conversation(inconvo, options, resolved_state)
+                conversation_id = await _create_conversation(inconvo, options, resolved_state)
                 result = {"conversationId": conversation_id}
 
             _emit(
@@ -251,9 +251,9 @@ def message_data_agent(
         if not message:
             raise ValueError("message is required.")
 
-        resolved_conversation_id = resolved_state.conversation_id or conversation_id
+        resolved_conversation_id = conversation_id or resolved_state.conversation_id
         if not resolved_conversation_id:
-            resolved_conversation_id = _create_conversation(inconvo, options, resolved_state)
+            resolved_conversation_id = await _create_conversation(inconvo, options, resolved_state)
         resolved_state.conversation_id = resolved_conversation_id
 
         tool_name = "message_data_agent"
@@ -263,7 +263,7 @@ def message_data_agent(
         }
 
         try:
-            response = inconvo.agents.conversations.response.create(
+            response = await inconvo.agents.conversations.response.create(
                 resolved_conversation_id,
                 agent_id=options.agent_id,
                 message=message,

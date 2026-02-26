@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, TypedDict
 
-from inconvo import Inconvo
+from inconvo import AsyncInconvo
 
 JsonPrimitive = str | int | float | bool | None
 JsonValue = JsonPrimitive | list["JsonValue"] | dict[str, "JsonValue"]
@@ -24,7 +24,7 @@ class InconvoToolsOptions:
     agent_id: str
     user_identifier: str
     user_context: dict[str, str | int | float | bool]
-    inconvo: Inconvo | None = None
+    inconvo: AsyncInconvo | None = None
     message_description: str | None = None
 
 
