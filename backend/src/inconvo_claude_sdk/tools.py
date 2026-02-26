@@ -241,12 +241,25 @@ def message_data_agent(
         }
 
         try:
-            response = await inconvo.agents.conversations.response.create(
+            stream = await inconvo.agents.conversations.response.create(
                 resolved_conversation_id,
                 agent_id=options.agent_id,
                 message=message,
+                stream=True,
             )
-            result = _serialize_response(response)
+            result = None
+            async for event in stream:
+                event_type = event.get("type") if isinstance(event, dict) else None
+                if event_type == "response.progress":
+                    progress_msg = event.get("message", "")
+                    if resolved_state.on_streaming_chunk and progress_msg:
+                        resolved_state.on_streaming_chunk(resolved_conversation_id, progress_msg)
+                elif event_type == "response.completed":
+                    completed = event.get("response")
+                    if completed is not None:
+                        result = _serialize_response(completed)
+            if result is None:
+                raise RuntimeError("No completed response received from Inconvo stream.")
             _emit(
                 resolved_state,
                 {

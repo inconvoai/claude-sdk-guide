@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,6 +10,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from inconvo_claude_sdk import (
@@ -159,6 +161,7 @@ async def _create_session(
         agents=inconvo_data_agent_definition(),
         model=CLAUDE_MODEL,
         system_prompt=SYSTEM_PROMPT,
+        include_partial_messages=True,
         env={
             "ANTHROPIC_API_KEY": anthropic_api_key,
             "HOME": _ensure_claude_home(),
@@ -251,6 +254,150 @@ async def chat(request: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:  # pragma: no cover
         raise HTTPException(status_code=500, detail=f"Chat processing failed: {exc}") from exc
+
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest) -> StreamingResponse:
+    text = request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text cannot be empty")
+
+    session_id = request.session_id or uuid4().hex
+
+    try:
+        session = await _get_or_create_session(
+            session_id=session_id,
+            anthropic_api_key=_require_env("ANTHROPIC_API_KEY"),
+            inconvo_agent_id=_require_env("INCONVO_AGENT_ID"),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    async def generate():
+        from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock
+        from claude_agent_sdk.types import StreamEvent
+
+        event_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+        tool_calls: list[ToolCall] = []
+        result_holder: dict[str, Any] = {}
+
+        def on_tool_call(record: dict[str, Any]) -> None:
+            tool_calls.append(ToolCall(**record))
+            if record.get("name") == "start_data_agent_conversation":
+                output = record.get("output", {})
+                if isinstance(output, dict) and "conversationId" in output:
+                    event_queue.put_nowait({
+                        "type": "conversation_start",
+                        "conversation_id": output["conversationId"],
+                    })
+            elif record.get("name") == "message_data_agent":
+                conv_id = record.get("input", {}).get("conversation_id")
+                if conv_id:
+                    event_queue.put_nowait({
+                        "type": "conversation_complete",
+                        "conversation_id": conv_id,
+                    })
+
+        def on_chunk(conversation_id: str, progress_msg: str) -> None:
+            event_queue.put_nowait({
+                "type": "inconvo_progress",
+                "conversation_id": conversation_id,
+                "message": progress_msg,
+            })
+
+        async def run_turn() -> None:
+            try:
+                await session.client.query(text)
+
+                chunks: list[str] = []
+                final_result: ResultMessage | None = None
+                pending_task_inputs: dict[int, str] = {}
+
+                async for message in session.client.receive_response():
+                    if isinstance(message, StreamEvent):
+                        event = message.event
+                        event_type = event.get("type")
+
+                        if event_type == "content_block_start":
+                            cb = event.get("content_block", {})
+                            idx = event.get("index", -1)
+                            if cb.get("type") == "tool_use" and cb.get("name") == "Task":
+                                pending_task_inputs[idx] = ""
+
+                        elif event_type == "content_block_delta":
+                            idx = event.get("index", -1)
+                            delta = event.get("delta", {})
+                            if delta.get("type") == "input_json_delta" and idx in pending_task_inputs:
+                                pending_task_inputs[idx] += delta.get("partial_json", "")
+
+                        elif event_type == "content_block_stop":
+                            idx = event.get("index", -1)
+                            if idx in pending_task_inputs:
+                                raw = pending_task_inputs.pop(idx)
+                                try:
+                                    task_input = json.loads(raw) if raw else {}
+                                except json.JSONDecodeError:
+                                    task_input = {}
+                                description = task_input.get("description", json.dumps(task_input))
+                                event_queue.put_nowait({"type": "task_start", "description": description})
+
+                    elif isinstance(message, AssistantMessage):
+                        for block in message.content:
+                            if isinstance(block, TextBlock):
+                                chunks.append(block.text)
+
+                    elif isinstance(message, ResultMessage):
+                        final_result = message
+
+                if final_result and final_result.is_error:
+                    detail = final_result.result or f"Claude returned error: {final_result.subtype}"
+                    result_holder["error"] = detail
+                else:
+                    result_holder["assistant_text"] = "\n".join(c for c in chunks if c).strip()
+
+            except Exception as exc:
+                result_holder["error"] = f"Chat processing failed: {exc}"
+            finally:
+                event_queue.put_nowait(None)  # sentinel
+
+        try:
+            async with session.lock:
+                session.data_agent.set_tool_call_logger(on_tool_call)
+                session.data_agent.set_streaming_chunk_handler(on_chunk)
+                try:
+                    turn_task = asyncio.create_task(run_turn())
+
+                    while True:
+                        item = await event_queue.get()
+                        if item is None:
+                            break
+                        yield f"data: {json.dumps(item)}\n\n"
+
+                    await turn_task
+                finally:
+                    session.data_agent.clear_tool_call_logger()
+                    session.data_agent.clear_streaming_chunk_handler()
+
+            if "error" in result_holder:
+                yield f"data: {json.dumps({'type': 'error', 'detail': result_holder['error']})}\n\n"
+                return
+
+            response = ChatResponse(
+                assistant_text=result_holder.get("assistant_text", ""),
+                tool_calls=tool_calls,
+                session_id=session_id,
+                conversation_id=session.data_agent.conversation_id,
+            )
+            yield f"data: {json.dumps({'type': 'complete', **response.model_dump()})}\n\n"
+
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.on_event("shutdown")

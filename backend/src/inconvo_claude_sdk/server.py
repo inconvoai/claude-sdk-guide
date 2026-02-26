@@ -9,7 +9,7 @@ from .tools import (
     message_data_agent,
     start_data_agent_conversation,
 )
-from .types import InconvoToolsOptions, InconvoToolsState, ToolCallLogger
+from .types import InconvoToolsOptions, InconvoToolsState, StreamingChunkCallback, ToolCallLogger
 
 INCONVO_SERVER = "data-analyst"
 
@@ -108,6 +108,12 @@ class InconvoDataAgentServer(dict[str, Any]):
 
     def clear_tool_call_logger(self) -> None:
         self._state.on_tool_call = None
+
+    def set_streaming_chunk_handler(self, handler: StreamingChunkCallback | None) -> None:
+        self._state.on_streaming_chunk = handler
+
+    def clear_streaming_chunk_handler(self) -> None:
+        self._state.on_streaming_chunk = None
 
 
 def inconvo_data_agent(

@@ -14,7 +14,7 @@ type ChatMessage = {
 const shouldRenderToolCall = (call: ToolCall): boolean => {
   if (
     call.name === "start_data_agent_conversation" ||
-    call.name === "get_data_summary"
+    call.name === "get_data_agent_connected_data_summary"
   ) {
     return false;
   }
@@ -37,6 +37,9 @@ export default function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingItems, setLoadingItems] = useState<
+    Array<{ description: string; conversationId?: string; progress?: string; completed?: boolean }>
+  >([]);
   const [error, setError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | undefined>(undefined);
 
@@ -55,6 +58,7 @@ export default function Chat() {
     setInput("");
     setError(null);
     setIsLoading(true);
+    setLoadingItems([]);
 
     try {
       const nextSessionId =
@@ -68,42 +72,98 @@ export default function Chat() {
         session_id: nextSessionId,
       };
 
-      const response = await fetch("/api/chat", {
+      const response = await fetch("/api/chat/stream", {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-        },
+        headers: { "content-type": "application/json" },
         body: JSON.stringify(payload),
       });
 
-      const data = (await response.json()) as
-        | ChatResponse
-        | { detail?: string; error?: string; details?: string };
-      if (!response.ok) {
-        throw new Error(
-          ("detail" in data && data.detail) ||
-            ("error" in data && data.error) ||
-            ("details" in data && data.details) ||
-            "Request failed.",
-        );
+      if (!response.ok || !response.body) {
+        const text = await response.text();
+        throw new Error(text || "Request failed.");
       }
 
-      const success = data as ChatResponse;
-      if (success.session_id && success.session_id !== sessionId) {
-        setSessionId(success.session_id);
-      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
 
-      const assistantMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        text: success.assistant_text ?? "",
-        toolResults:
-          success.tool_calls
-            ?.filter(shouldRenderToolCall)
-            .map((call) => call.output) ?? [],
+      const processChunk = (chunk: string) => {
+        buffer += chunk;
+        const events = buffer.split("\n\n");
+        buffer = events.pop() ?? "";
+
+        for (const raw of events) {
+          const dataLine = raw.split("\n").find((l) => l.startsWith("data: "));
+          if (!dataLine) continue;
+          try {
+            const event = JSON.parse(dataLine.slice(6)) as Record<string, unknown>;
+
+            if (event.type === "task_start") {
+              setLoadingItems((prev) => [
+                ...prev,
+                { description: event.description as string },
+              ]);
+            } else if (event.type === "conversation_start") {
+              const convId = event.conversation_id as string;
+              setLoadingItems((prev) => {
+                const idx = prev.findIndex((item) => !item.conversationId);
+                if (idx === -1) return prev;
+                const next = [...prev];
+                next[idx] = { ...next[idx], conversationId: convId };
+                return next;
+              });
+            } else if (event.type === "inconvo_progress") {
+              const convId = event.conversation_id as string;
+              const msg = event.message as string;
+              setLoadingItems((prev) =>
+                prev.map((item) =>
+                  item.conversationId === convId
+                    ? { ...item, progress: msg }
+                    : item,
+                ),
+              );
+            } else if (event.type === "conversation_complete") {
+              const convId = event.conversation_id as string;
+              setLoadingItems((prev) =>
+                prev.map((item) =>
+                  item.conversationId === convId
+                    ? { ...item, completed: true }
+                    : item,
+                ),
+              );
+            } else if (event.type === "complete") {
+              const success = event as unknown as ChatResponse;
+              if (success.session_id && success.session_id !== sessionId) {
+                setSessionId(success.session_id);
+              }
+              const assistantMessage: ChatMessage = {
+                id: crypto.randomUUID(),
+                role: "assistant",
+                text: success.assistant_text ?? "",
+                toolResults:
+                  success.tool_calls
+                    ?.filter(shouldRenderToolCall)
+                    .map((call) => call.output) ?? [],
+              };
+              setMessages((prev) => [...prev, assistantMessage]);
+            } else if (event.type === "error") {
+              throw new Error((event.detail as string) || "Request failed.");
+            }
+          } catch (parseError) {
+            if (parseError instanceof Error && parseError.message !== "Unexpected end of JSON input") {
+              throw parseError;
+            }
+          }
+        }
       };
 
-      setMessages((prev) => [...prev, assistantMessage]);
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        processChunk(decoder.decode(value, { stream: true }));
+      }
+      if (buffer.trim()) processChunk("\n\n");
+
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -112,6 +172,7 @@ export default function Chat() {
       );
     } finally {
       setIsLoading(false);
+      setLoadingItems([]);
     }
   };
 
@@ -126,6 +187,9 @@ export default function Chat() {
             {message.text && (
               <div className="whitespace-pre-wrap">{message.text}</div>
             )}
+            {message.text && message.toolResults && message.toolResults.length > 0 && (
+              <hr className="my-4 border-zinc-200 dark:border-zinc-700" />
+            )}
             {message.toolResults?.map((result, i) => (
               <InconvoToolResult key={`${message.id}-tool-${i}`} result={result} />
             ))}
@@ -136,14 +200,23 @@ export default function Chat() {
       {isLoading && (
         <div className="mb-4">
           <div className="font-semibold mb-1">AI:</div>
-          <div className="flex items-center gap-2 p-4 text-sm text-zinc-500">
-            <div className="animate-spin h-4 w-4 border-2 border-zinc-300 border-t-zinc-600 rounded-full" />
-            <div>
-              <div>Querying your data...</div>
-              <div className="text-xs mt-1">
-                This may take a few moments for complex queries
-              </div>
+          <div className="p-4 text-sm text-zinc-500">
+            <div className="flex items-center gap-2">
+              <div className="animate-spin h-4 w-4 shrink-0 border-2 border-zinc-300 border-t-zinc-600 rounded-full" />
+              <span>Querying your data...</span>
             </div>
+            {loadingItems.length > 0 && (
+              <ul className="mt-2 ml-6 space-y-1 text-xs text-zinc-400">
+                {loadingItems.map((item, i) => (
+                  <li key={i} className={item.completed ? "text-zinc-600 dark:text-zinc-500" : ""}>
+                    {item.completed ? "✓" : <span className="inline-block animate-spin" style={{ animationDuration: "3s", animationDelay: `-${(Date.now() % 3000) / 1000}s` }}>*</span>}{" "}{item.description}
+                    {item.completed ? null : item.progress ? (
+                      <span className="ml-2 italic text-zinc-500">— {item.progress}</span>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
           </div>
         </div>
       )}
