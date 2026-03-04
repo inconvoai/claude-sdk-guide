@@ -1,0 +1,4 @@
+interface:
+  display_name: "Inconvo Agent Integration"
+  short_description: "Integrate Inconvo into custom agent runtimes"
+  default_prompt: "Integrate Inconvo data-agent tools into this agent stack with session-safe state, streaming progress, and structured tool outputs."
