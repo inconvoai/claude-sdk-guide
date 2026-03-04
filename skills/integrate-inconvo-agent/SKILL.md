@@ -18,7 +18,12 @@ Start from an existing Claude agent setup that already does all of the following
 
 ## Integration Steps (Existing Agent)
 1. Copy the four Python files below into `src/inconvo_claude_sdk/` in the target project.
-2. Add dependencies: `inconvo` and `claude-agent-sdk`.
+2. Install the Inconvo SDK (`claude-agent-sdk` is assumed to already exist in the project).
+
+```bash
+pip install inconvo
+```
+
 3. Patch your existing agent-options builder to register Inconvo server/tools/subagent.
 
 ```python
